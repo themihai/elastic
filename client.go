@@ -189,17 +189,17 @@ type Client struct {
 //
 // An error is also returned when some configuration option is invalid or
 // the new client cannot sniff the cluster (if enabled).
-func NewClient(options ...ClientOptionFunc) (*Client, error) {
-	return DialContext(context.Background(), options...)
+func NewClient(cx context.Context, options ...ClientOptionFunc) (*Client, error) {
+	return DialContext(cx, options...)
 }
 
 // NewClientFromConfig initializes a client from a configuration.
-func NewClientFromConfig(cfg *config.Config) (*Client, error) {
+func NewClientFromConfig(cx context.Context, cfg *config.Config) (*Client, error) {
 	options, err := configToOptions(cfg)
 	if err != nil {
 		return nil, err
 	}
-	return DialContext(context.Background(), options...)
+	return DialContext(cx, options...)
 }
 
 // NewSimpleClient creates a new short-lived Client that can be used in
@@ -291,11 +291,6 @@ func NewSimpleClient(options ...ClientOptionFunc) (*Client, error) {
 	c.mu.Unlock()
 
 	return c, nil
-}
-
-// Dial will call DialContext with a background context.
-func Dial(options ...ClientOptionFunc) (*Client, error) {
-	return DialContext(context.Background(), options...)
 }
 
 // DialContext will connect to Elasticsearch, just like NewClient does.
@@ -391,10 +386,10 @@ func DialContext(ctx context.Context, options ...ClientOptionFunc) (*Client, err
 	}
 
 	if c.snifferEnabled {
-		go c.sniffer() // periodically update cluster information
+		go c.sniffer(ctx) // periodically update cluster information
 	}
 	if c.healthcheckEnabled {
-		go c.healthchecker() // start goroutine periodically ping all nodes of the cluster
+		go c.healthchecker(ctx) // start goroutine periodically ping all nodes of the cluster
 	}
 
 	c.mu.Lock()
@@ -743,7 +738,7 @@ func (c *Client) IsRunning() bool {
 // client with NewClient; the background processes are run by default.
 //
 // If the background processes are already running, this is a no-op.
-func (c *Client) Start() {
+func (c *Client) Start(cx context.Context) {
 	c.mu.RLock()
 	if c.running {
 		c.mu.RUnlock()
@@ -752,12 +747,11 @@ func (c *Client) Start() {
 	c.mu.RUnlock()
 
 	if c.snifferEnabled {
-		go c.sniffer()
+		go c.sniffer(cx)
 	}
 	if c.healthcheckEnabled {
-		go c.healthchecker()
+		go c.healthchecker(cx)
 	}
-
 	c.mu.Lock()
 	c.running = true
 	c.mu.Unlock()
@@ -837,7 +831,7 @@ func (c *Client) dumpResponse(resp *http.Response) {
 }
 
 // sniffer periodically runs sniff.
-func (c *Client) sniffer() {
+func (c *Client) sniffer(cx context.Context) {
 	c.mu.RLock()
 	timeout := c.snifferTimeout
 	interval := c.snifferInterval
@@ -853,7 +847,7 @@ func (c *Client) sniffer() {
 			c.snifferStop <- true
 			return
 		case <-ticker.C:
-			c.sniff(context.Background(), timeout)
+			c.sniff(cx, timeout)
 		}
 	}
 }
@@ -1031,7 +1025,7 @@ func (c *Client) updateConns(conns []*conn) {
 }
 
 // healthchecker periodically runs healthcheck.
-func (c *Client) healthchecker() {
+func (c *Client) healthchecker(cx context.Context) {
 	c.mu.RLock()
 	timeout := c.healthcheckTimeout
 	interval := c.healthcheckInterval
@@ -1047,7 +1041,7 @@ func (c *Client) healthchecker() {
 			c.healthcheckStop <- true
 			return
 		case <-ticker.C:
-			c.healthcheck(context.Background(), timeout, false)
+			c.healthcheck(cx, timeout, false)
 		}
 	}
 }
@@ -1142,7 +1136,7 @@ func (c *Client) startupHealthcheck(parentCtx context.Context, timeout time.Dura
 			if basicAuth {
 				req.SetBasicAuth(basicAuthUsername, basicAuthPassword)
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), timeout)
+			ctx, cancel := context.WithTimeout(parentCtx, timeout)
 			defer cancel()
 			req = req.WithContext(ctx)
 			res, err := c.c.Do(req)
@@ -1914,8 +1908,8 @@ func (c *Client) XPackWatchRestart() *XPackWatcherRestartService {
 
 // ElasticsearchVersion returns the version number of Elasticsearch
 // running on the given URL.
-func (c *Client) ElasticsearchVersion(url string) (string, error) {
-	res, _, err := c.Ping(url).Do(context.Background())
+func (c *Client) ElasticsearchVersion(cx context.Context, url string) (string, error) {
+	res, _, err := c.Ping(url).Do(cx)
 	if err != nil {
 		return "", err
 	}
@@ -1923,8 +1917,8 @@ func (c *Client) ElasticsearchVersion(url string) (string, error) {
 }
 
 // IndexNames returns the names of all indices in the cluster.
-func (c *Client) IndexNames() ([]string, error) {
-	res, err := c.IndexGetSettings().Index("_all").Do(context.Background())
+func (c *Client) IndexNames(cx context.Context) ([]string, error) {
+	res, err := c.IndexGetSettings().Index("_all").Do(cx)
 	if err != nil {
 		return nil, err
 	}
@@ -1950,8 +1944,8 @@ func (c *Client) Ping(url string) *PingService {
 // WaitForStatus waits for the specified timeout, e.g. "10s".
 // If the cluster will have the given state within the timeout, nil is returned.
 // If the request timed out, ErrTimeout is returned.
-func (c *Client) WaitForStatus(status string, timeout string) error {
-	health, err := c.ClusterHealth().WaitForStatus(status).Timeout(timeout).Do(context.Background())
+func (c *Client) WaitForStatus(cx context.Context, status string, timeout string) error {
+	health, err := c.ClusterHealth().WaitForStatus(status).Timeout(timeout).Do(cx)
 	if err != nil {
 		return err
 	}
@@ -1963,12 +1957,12 @@ func (c *Client) WaitForStatus(status string, timeout string) error {
 
 // WaitForGreenStatus waits for the cluster to have the "green" status.
 // See WaitForStatus for more details.
-func (c *Client) WaitForGreenStatus(timeout string) error {
-	return c.WaitForStatus("green", timeout)
+func (c *Client) WaitForGreenStatus(cx context.Context, timeout string) error {
+	return c.WaitForStatus(cx, "green", timeout)
 }
 
 // WaitForYellowStatus waits for the cluster to have the "yellow" status.
 // See WaitForStatus for more details.
-func (c *Client) WaitForYellowStatus(timeout string) error {
-	return c.WaitForStatus("yellow", timeout)
+func (c *Client) WaitForYellowStatus(cx context.Context, timeout string) error {
+	return c.WaitForStatus(cx, "yellow", timeout)
 }
